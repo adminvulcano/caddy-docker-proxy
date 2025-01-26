@@ -4,7 +4,6 @@ RUN apk add -U --no-cache ca-certificates
 # Image starts here
 FROM scratch
 ARG TARGETPLATFORM
-LABEL maintainer "Lucas Lorentz <lucaslorentzlara@hotmail.com>"
 
 EXPOSE 80 443 2019
 ENV XDG_CONFIG_HOME /config
