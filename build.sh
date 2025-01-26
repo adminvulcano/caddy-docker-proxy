@@ -14,7 +14,8 @@ go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 CGO_ENABLED=0 GOARCH=amd64 GOOS=linux \
     xcaddy build \
     --output ${ARTIFACTS}/binaries/linux/amd64/caddy \
-    --with github.com/lucaslorentz/caddy-docker-proxy/v2=$PWD
+    --with github.com/lucaslorentz/caddy-docker-proxy/v2=$PWD \
+    --with github.com/tailscale/caddy-tailscale
 
 # ARM
 CGO_ENABLED=0 GOARCH=arm GOARM=6 GOOS=linux \
