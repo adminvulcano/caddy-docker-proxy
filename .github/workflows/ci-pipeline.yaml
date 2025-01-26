@@ -8,12 +8,29 @@ on:
       - '*'
   pull_request:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
   build_binaries:
     name: Build Binaries
     runs-on: ubuntu-20.04
 
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
     steps:
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
@@ -57,32 +74,6 @@ jobs:
 
       - name: Build Docker Images
         run: ./build-images-linux.sh
-        env:
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        shell: bash
-
-  windows:
-    name: Windows
-    runs-on: windows-2022
-    needs: build_binaries
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Download Build Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: binaries
-          path: artifacts/binaries
-
-      # Uncomment this step if needed once windows docker tests are implemented
-      # - name: Run Docker Tests (Windows)
-      #   run: .\run-docker-tests-windows.sh
-      #   shell: bash
-
-      - name: Build Docker Images
-        run: ./build-images-windows.sh
         env:
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         shell: bash
