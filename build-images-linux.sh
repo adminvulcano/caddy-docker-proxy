@@ -11,13 +11,13 @@ PLATFORMS="linux/amd64"
 OUTPUT="type=local,dest=local"
 TAGS=
 TAGS_ALPINE=
-
+IMAGE="${REGISTRY}/${IMAGE_NAME}"
 if [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
     echo "Building and pushing CI images"
 
     OUTPUT="type=registry"
-    TAGS="-t adminvulcano/caddy-docker-proxy:ci"
-    TAGS_ALPINE="-t adminvulcano/caddy-docker-proxy:ci-alpine"
+    TAGS="-t ${IMAGE}:ci"
+    TAGS_ALPINE="-t ${IMAGE}:ci-alpine"
 fi
 
 if [[ "${GITHUB_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-.*)?$ ]]; then
@@ -29,12 +29,12 @@ if [[ "${GITHUB_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-.*)?$ ]]; then
     MINOR_VERSION=$(echo $PATCH_VERSION | cut -d. -f-2)
 
     OUTPUT="type=registry"
-    TAGS="-t adminvulcano/caddy-docker-proxy:latest \
-        -t adminvulcano/caddy-docker-proxy:${PATCH_VERSION} \
-        -t adminvulcano/caddy-docker-proxy:${MINOR_VERSION}"
-    TAGS_ALPINE="-t adminvulcano/caddy-docker-proxy:alpine \
-        -t adminvulcano/caddy-docker-proxy:${PATCH_VERSION}-alpine \
-        -t adminvulcano/caddy-docker-proxy:${MINOR_VERSION}-alpine"
+    TAGS="-t ${IMAGE}:latest \
+        -t ${IMAGE}:${PATCH_VERSION} \
+        -t ${IMAGE}:${MINOR_VERSION}"
+    TAGS_ALPINE="-t ${IMAGE}:alpine \
+        -t ${IMAGE}:${PATCH_VERSION}-alpine \
+        -t ${IMAGE}:${MINOR_VERSION}-alpine"
 fi
 
 docker buildx build -f Dockerfile . \
