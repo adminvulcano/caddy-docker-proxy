@@ -5,7 +5,7 @@ go 1.23.1
 toolchain go1.23.5
 
 require (
-	github.com/caddyserver/caddy/v2 v2.8.4
+	github.com/caddyserver/caddy/v2 v2.9.1
 	github.com/docker/docker v27.5.1+incompatible
 	github.com/joho/godotenv v1.5.1
 	github.com/stretchr/testify v1.10.0
