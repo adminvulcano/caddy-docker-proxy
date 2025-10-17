@@ -1,6 +1,6 @@
 module github.com/lucaslorentz/caddy-docker-proxy/v2
 
-go 1.25
+go 1.25.3
 
 require (
 	github.com/caddyserver/caddy/v2 v2.10.2
