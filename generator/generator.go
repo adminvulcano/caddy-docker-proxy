@@ -7,10 +7,12 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/caddyfile"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/config"
@@ -39,7 +41,7 @@ type CaddyfileGenerator struct {
 
 // CreateGenerator creates a new generator
 func CreateGenerator(dockerClients []docker.Client, dockerUtils docker.Utils, options *config.Options) *CaddyfileGenerator {
-	var labelRegexString = fmt.Sprintf("^%s(_\\d+)?(\\.|$)", options.LabelPrefix)
+	var labelRegexString = fmt.Sprintf("^%s(_\\d+)?(\\.|$)", regexp.QuoteMeta(options.LabelPrefix))
 
 	return &CaddyfileGenerator{
 		options:          options,
@@ -54,13 +56,11 @@ func CreateGenerator(dockerClients []docker.Client, dockerUtils docker.Utils, op
 func (g *CaddyfileGenerator) GenerateCaddyfile(logger *zap.Logger) ([]byte, []string) {
 	var caddyfileBuffer bytes.Buffer
 
-	if g.ingressNetworks == nil {
-		ingressNetworks, err := g.getIngressNetworks(logger)
-		if err == nil {
-			g.ingressNetworks = ingressNetworks
-		} else {
-			logger.Error("Failed to get ingress networks", zap.Error(err))
-		}
+	ingressNetworks, err := g.getIngressNetworks(logger)
+	if err == nil {
+		g.ingressNetworks = ingressNetworks
+	} else {
+		logger.Error("Failed to get ingress networks", zap.Error(err))
 	}
 
 	if time.Since(g.swarmIsAvailableTime) > swarmAvailabilityCacheInterval {
@@ -236,7 +236,7 @@ func (g *CaddyfileGenerator) getIngressNetworks(logger *zap.Logger) (map[string]
 
 	for _, dockerClient := range g.dockerClients {
 		if len(g.options.IngressNetworks) > 0 {
-			networks, err := dockerClient.NetworkList(context.Background(), types.NetworkListOptions{})
+			networks, err := dockerClient.NetworkList(context.Background(), network.ListOptions{})
 			if err != nil {
 				return nil, err
 			}
@@ -262,8 +262,8 @@ func (g *CaddyfileGenerator) getIngressNetworks(logger *zap.Logger) (map[string]
 				return nil, err
 			}
 
-			for _, network := range container.NetworkSettings.Networks {
-				networkInfo, err := dockerClient.NetworkInspect(context.Background(), network.NetworkID, types.NetworkInspectOptions{})
+			for _, networkEndpoint := range container.NetworkSettings.Networks {
+				networkInfo, err := dockerClient.NetworkInspect(context.Background(), networkEndpoint.NetworkID, network.InspectOptions{})
 				if err != nil {
 					return nil, err
 				}
@@ -285,6 +285,8 @@ func (g *CaddyfileGenerator) filterLabels(labels map[string]string) map[string]s
 	filteredLabels := map[string]string{}
 	for label, value := range labels {
 		if g.labelRegex.MatchString(label) {
+			// Canonicalize label prefix to "caddy", to prevent any meta characters in the prefix from causing problem in block parsing
+			label = strings.Replace(label, g.options.LabelPrefix, "caddy", 1)
 			filteredLabels[label] = value
 		}
 	}

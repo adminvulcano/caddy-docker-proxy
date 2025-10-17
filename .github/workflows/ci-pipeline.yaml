@@ -3,7 +3,7 @@ name: CI Pipeline
 on:
   push:
     branches:
-      - '*'
+      - 'master'
     tags:
       - '*'
   pull_request:
@@ -15,7 +15,7 @@ env:
 jobs:
   build_binaries:
     name: Build Binaries
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
 
     permissions:
       contents: read
@@ -28,7 +28,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: 1.22.8
+          go-version: 1.24.4
 
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
 
   linux:
     name: Linux
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     needs: build_binaries
 
     steps:

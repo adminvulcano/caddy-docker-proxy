@@ -15,7 +15,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/joho/godotenv"
@@ -189,11 +189,12 @@ func (dockerLoader *DockerLoader) listenEvents() {
 	args.Add("type", "service")
 	args.Add("type", "container")
 	args.Add("type", "config")
+	args.Add("type", "network")
 
 	for i, dockerClient := range dockerLoader.dockerClients {
 		context, cancel := context.WithCancel(context.Background())
 
-		eventsChan, errorChan := dockerClient.Events(context, types.EventsOptions{
+		eventsChan, errorChan := dockerClient.Events(context, events.ListOptions{
 			Filters: args,
 		})
 
@@ -217,7 +218,9 @@ func (dockerLoader *DockerLoader) listenEvents() {
 					(event.Type == "service" && event.Action == "update") ||
 					(event.Type == "service" && event.Action == "remove") ||
 					(event.Type == "config" && event.Action == "create") ||
-					(event.Type == "config" && event.Action == "remove")
+					(event.Type == "config" && event.Action == "remove") ||
+					(event.Type == "network" && event.Action == "connect") ||
+					(event.Type == "network" && event.Action == "disconnect")
 
 				if update {
 					dockerLoader.skipEvents[i] = true
