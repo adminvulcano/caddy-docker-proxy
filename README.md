@@ -13,7 +13,7 @@ Every time a Docker object changes, the plugin updates the Caddyfile and trigger
 
 ## Table of contents
 
-  * [Basic usage example, using docker-compose](#basic-usage-example-using-docker-compose)
+  * [Basic usage example, using docker compose](#basic-usage-example-using-docker-compose)
   * [Labels to Caddyfile conversion](#labels-to-caddyfile-conversion)
     + [Tokens and arguments](#tokens-and-arguments)
     + [Ordering and isolation](#ordering-and-isolation)
@@ -30,7 +30,7 @@ Every time a Docker object changes, the plugin updates the Caddyfile and trigger
     + [Server](#server)
     + [Controller](#controller)
     + [Standalone (default)](#standalone-default)
-  * [Caddy CLI](#caddy-cli)
+  * [Options](#options)
   * [Docker images](#docker-images)
     + [Choosing the version numbers](#choosing-the-version-numbers)
     + [Chosing between default or alpine images](#chosing-between-default-or-alpine-images)
@@ -41,18 +41,21 @@ Every time a Docker object changes, the plugin updates the Caddyfile and trigger
   * [Connecting to Docker Host](#connecting-to-docker-host)
   * [Volumes](#volumes)
   * [Trying it](#trying-it)
-    + [With docker-compose file](#with-docker-compose-file)
+    + [With Docker Compose (`compose.yaml`)](#with-docker-compose-composeyaml)
     + [With run commands](#with-run-commands)
   * [Building it](#building-it)
 
-## Basic usage example, using docker-compose
+## Basic usage example (Docker Compose)
 ```shell
-$ docker network create caddy
+$ docker network create caddy --ipv6
 ```
 
-`caddy/docker-compose.yml`
+> [!NOTE]
+> The `--ipv6` flag instructs Docker to assign IPv6 addresses for all containers connected to this network.
+> Without this flag, Caddy (as well as any upstream services) will see Docker's gateway IP address instead of the actual client IP addresses for IPv6 clients.
+
+`caddy/compose.yaml`
 ```yml
-version: "3.7"
 services:
   caddy:
     image: lucaslorentz/caddy-docker-proxy:ci-alpine
@@ -77,12 +80,11 @@ volumes:
   caddy_data: {}
 ```
 ```shell
-$ docker-compose up -d
+$ docker compose up -d
 ```
 
-`whoami/docker-compose.yml`
+`whoami/compose.yaml`
 ```yml
-version: '3.7'
 services:
   whoami:
     image: traefik/whoami
@@ -97,7 +99,7 @@ networks:
     external: true
 ```
 ```shell
-$ docker-compose up -d
+$ docker compose up -d
 ```
 Now, visit `https://whoami.example.com`. The site will be served [automatically over HTTPS](https://caddyserver.com/docs/automatic-https) with a certificate issued by Let's Encrypt or ZeroSSL.
 		
@@ -358,6 +360,26 @@ caddy.reverse_proxy: "{{upstreams}}"
 reverse_proxy "192.168.0.1 192.168.0.2"
 ```
 
+### lowestExposedPort
+
+Returns the lowest TCP port exposed by the current container (`EXPOSE` in the image, or `--expose`/`expose:` at runtime). It is meant to be used as the port argument of `upstreams`, so the port doesn't need to be hardcoded in the label.
+
+Only available for containers. For swarm services it fails with an error, and the port must be specified explicitly.
+
+Examples:
+```
+caddy.reverse_proxy: {{upstreams lowestExposedPort}}
+↓
+reverse_proxy 192.168.0.1:8080 192.168.0.2:8080
+```
+```
+caddy.reverse_proxy: {{upstreams https lowestExposedPort}}
+↓
+reverse_proxy https://192.168.0.1:8443 https://192.168.0.2:8443
+```
+
+When the container exposes more than one TCP port, the lowest one is used. If it's not the right one, specify the port explicitly.
+
 ## Examples
 Proxying all requests to a domain to the container
 ```yml
@@ -370,6 +392,13 @@ Proxying all requests to a domain to a subpath in the container
 caddy: example.com
 caddy.rewrite: * /target{path}
 caddy.reverse_proxy: {{upstreams}}
+```
+
+Proxying requests matching a path
+```yml
+caddy: example.com
+caddy.handle: /source/*
+caddy.handle.0_reverse_proxy: {{upstreams}}
 ```
 
 Proxying requests matching a path, while stripping that path prefix
@@ -402,6 +431,13 @@ caddy: example.com, example.org, www.example.com, www.example.org
 caddy.reverse_proxy: {{upstreams}}
 ```
 
+Redirecting
+```yml
+caddy: example.com
+caddy.redir_0: /favicon.ico  /alternative/icon.ico 302
+caddy.redir_1: /photo.png    /updated-photo.png    302
+```
+
 **More community-maintained examples are available in the [Wiki](https://github.com/lucaslorentz/caddy-docker-proxy/wiki).**
 
 ## Docker configs
@@ -416,7 +452,7 @@ You can also add raw text to your Caddyfile using Docker configs. Just add Caddy
 Caddy docker proxy is able to proxy to swarm services or raw containers. Both features are always enabled, and what will differentiate the proxy target is where you define your labels.
 
 ### Services
-To proxy swarm services, labels should be defined at service level. In a docker-compose file, labels should be _inside_ `deploy`, like:
+To proxy swarm services, labels should be defined at service level. With your `compose.yaml`, labels should be _inside_ `deploy`, like:
 ```yml
 services:
   foo:
@@ -429,7 +465,7 @@ services:
 Caddy will use service DNS name as target or all service tasks IPs, depending on configuration **proxy-service-tasks**.
 
 ### Containers
-To proxy containers, labels should be defined at container level. In a docker-compose file, labels should be _outside_ `deploy`, like:
+To proxy containers, labels should be defined at container level. With your `compose.yaml`, labels should be _outside_ `deploy`, like:
 ```yml
 services:
   foo:
@@ -472,66 +508,42 @@ This mode executes a controller and a server in the same instance and doesn't re
 
 [Configuration example](examples/standalone.yaml#L11)
 
-## Caddy CLI
+## Options
 
-This plugin extends caddy's CLI with the command `caddy docker-proxy`.
+This plugin extends Caddy's CLI with the `caddy docker-proxy` command. Each option below can be configured either as a CLI flag or via its corresponding environment variable — use whichever fits your deployment.
 
-Run `caddy help docker-proxy` to see all available flags.
+Run `caddy help docker-proxy` to see the raw flag output.
 
+| CLI flag | Env var | Description |
+|---|---|---|
+| `--mode` | `CADDY_DOCKER_MODE` | Which mode to run: `standalone` \| `controller` \| `server`.<br>**Default:** `standalone` |
+| `--docker-sockets` | `CADDY_DOCKER_SOCKETS` | Comma-separated Docker sockets.<br>**Default:** `DOCKER_HOST` or the default socket |
+| `--docker-certs-path` | `CADDY_DOCKER_CERTS_PATH` | Comma-separated cert paths (one per socket; leave entry empty for sockets without certs) |
+| `--docker-apis-version` | `CADDY_DOCKER_APIS_VERSION` | Comma-separated API versions (one per socket) |
+| `--controller-network` | `CADDY_CONTROLLER_NETWORK` | Network allowed to configure the Caddy server, in CIDR (e.g. `10.200.200.0/24`) |
+| `--ingress-networks` | `CADDY_INGRESS_NETWORKS` | Comma-separated ingress networks connecting Caddy to containers.<br>**Default:** networks attached to the controller container |
+| `--caddyfile-path` | `CADDY_DOCKER_CADDYFILE_PATH` | Path to a base Caddyfile that will be extended with Docker sites |
+| `--envfile` | `CADDY_DOCKER_ENVFILE` | Path to an env file (`KEY=VALUE`) loaded into the Caddy process |
+| `--label-prefix` | `CADDY_DOCKER_LABEL_PREFIX` | Prefix for Docker labels.<br>**Default:** `caddy` |
+| `--proxy-service-tasks` | `CADDY_DOCKER_PROXY_SERVICE_TASKS` | Proxy to service tasks instead of the service load balancer.<br>**Default:** `true` |
+| `--process-caddyfile` | `CADDY_DOCKER_PROCESS_CADDYFILE` | Process the Caddyfile before loading, removing invalid servers.<br>**Default:** `true` |
+| `--scan-stopped-containers` | `CADDY_DOCKER_SCAN_STOPPED_CONTAINERS` | Scan stopped containers and use their labels.<br>**Default:** `false` |
+| `--polling-interval` | `CADDY_DOCKER_POLLING_INTERVAL` | Interval to manually check Docker for a new Caddyfile.<br>**Default:** `30s` |
+| `--event-throttle-interval` | `CADDY_DOCKER_EVENT_THROTTLE_INTERVAL` | Interval to throttle Caddyfile updates triggered by Docker events.<br>**Default:** `100ms` |
+| `--log-level` | `CADDY_DOCKER_LOG_LEVEL` | Log level: `DEBUG` \| `INFO` \| `WARN` \| `ERROR`. Empty keeps Caddy's default |
+| `--log-format` | `CADDY_DOCKER_LOG_FORMAT` | Log format: `console` \| `json`. Empty keeps Caddy's default |
+| _(env only)_ | `CADDY_ADMIN` | Override Caddy's admin listen address, or `off` to disable the admin API. Enabled by default on `localhost:2019` (Caddy's default), which health checks and `/metrics` can rely on. The [`admin` global option](https://caddyserver.com/docs/caddyfile/options) via labels (e.g. `caddy.admin: off`) is also respected |
+| _(env only)_ | `CADDY_DOCKER_NO_SCOPE` | Disable Docker event scope filter (useful for Podman).<br>**Default:** `false` |
+
+Check the **examples** folder to see how to set them in a Docker Compose file.
+
+## Viewing the generated Caddyfile
+
+The generated Caddyfile is automatically saved to `Caddyfile.autosave` inside Caddy's config directory whenever it changes. The full path is logged at startup and depends on the environment (typically `/config/caddy/Caddyfile.autosave` in Docker). You can inspect it to troubleshoot label-to-Caddyfile conversion issues:
+
+```sh
+docker exec <caddy-container> cat /config/caddy/Caddyfile.autosave
 ```
-Usage of docker-proxy:
-  --caddyfile-path string
-        Path to a base Caddyfile that will be extended with Docker sites
-  --envfile
-        Path to an environment file with environment variables in the KEY=VALUE format to load into the Caddy process
-  --controller-network string
-        Network allowed to configure Caddy server in CIDR notation. Ex: 10.200.200.0/24
-  --ingress-networks string
-        Comma separated name of ingress networks connecting Caddy servers to containers.
-        When not defined, networks attached to controller container are considered ingress networks
-  --docker-sockets
-        Comma separated docker sockets
-        When not defined, DOCKER_HOST (or default docker socket if DOCKER_HOST not defined)
-  --docker-certs-path
-        Comma separated cert path, you could use empty value when no cert path for the concern index docker socket like cert_path0,,cert_path2
-  --docker-apis-version
-        Comma separated apis version, you could use empty value when no api version for the concern index docker socket like cert_path0,,cert_path2
-  --label-prefix string
-        Prefix for Docker labels (default "caddy")
-  --mode
-        Which mode this instance should run: standalone | controller | server
-  --polling-interval duration
-        Interval Caddy should manually check Docker for a new Caddyfile (default 30s)
-  --event-throttle-interval duration
-        Interval to throttle caddyfile updates triggered by docker events (default 100ms)
-  --process-caddyfile
-        Process Caddyfile before loading it, removing invalid servers (default true)
-  --proxy-service-tasks
-        Proxy to service tasks instead of service load balancer (default true)
-  --scan-stopped-containers
-        Scan stopped containers and use their labels for Caddyfile generation (default false)
-```
-
-Those flags can also be set via environment variables:
-
-```
-CADDY_DOCKER_CADDYFILE_PATH=<string>
-CADDY_DOCKER_ENVFILE=<string>
-CADDY_CONTROLLER_NETWORK=<string>
-CADDY_INGRESS_NETWORKS=<string>
-CADDY_DOCKER_SOCKETS=<string>
-CADDY_DOCKER_CERTS_PATH=<string>
-CADDY_DOCKER_APIS_VERSION=<string>
-CADDY_DOCKER_LABEL_PREFIX=<string>
-CADDY_DOCKER_MODE=<string>
-CADDY_DOCKER_POLLING_INTERVAL=<duration>
-CADDY_DOCKER_PROCESS_CADDYFILE=<bool>
-CADDY_DOCKER_PROXY_SERVICE_TASKS=<bool>
-CADDY_DOCKER_SCAN_STOPPED_CONTAINERS=<bool>
-CADDY_DOCKER_NO_SCOPE=<bool, default scope used>
-```
-
-Check **examples** folder to see how to set them on a Docker Compose file.
 
 ## Docker images
 Docker images are available at Docker hub:
@@ -612,7 +624,7 @@ Multiple Caddy instances automatically orchestrate certificate issuing between t
 
 ## Trying it
 
-### With docker-compose file
+### With Docker Compose (`compose.yaml`)
 
 Clone this repository.
 

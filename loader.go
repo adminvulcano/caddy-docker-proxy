@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"path/filepath"
 	"sync"
 	"time"
@@ -15,14 +13,12 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
 	"github.com/joho/godotenv"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/config"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/docker"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/generator"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/utils"
+	"github.com/moby/moby/client"
 
 	"go.uber.org/zap"
 )
@@ -42,6 +38,7 @@ type DockerLoader struct {
 	lastVersion     int64
 	serversVersions *utils.StringInt64CMap
 	serversUpdating *utils.StringBoolCMap
+	caddyLogging    *caddy.Logging
 }
 
 // CreateDockerLoader creates a docker loader
@@ -50,12 +47,12 @@ func CreateDockerLoader(options *config.Options) *DockerLoader {
 		options:         options,
 		serversVersions: utils.NewStringInt64CMap(),
 		serversUpdating: utils.NewStringBoolCMap(),
+		caddyLogging:    buildCaddyLoggingConfig(options),
 	}
 }
 
 func logger() *zap.Logger {
-	return caddy.Log().
-		Named("docker-proxy")
+	return caddy.Log().Named("docker-proxy")
 }
 
 // Start docker loader
@@ -78,7 +75,7 @@ func (dockerLoader *DockerLoader) Start() error {
 	dockerClients := []docker.Client{}
 	for i, dockerSocket := range dockerLoader.options.DockerSockets {
 		// cf https://github.com/docker/go-docker/blob/master/client.go
-		// setenv to use NewEnvClient
+		// set env to configure the Docker client
 		// or manually
 
 		os.Setenv("DOCKER_HOST", dockerSocket)
@@ -95,19 +92,17 @@ func (dockerLoader *DockerLoader) Start() error {
 			os.Unsetenv("DOCKER_API_VERSION")
 		}
 
-		dockerClient, err := client.NewEnvClient()
+		dockerClient, err := client.New(client.FromEnv)
 		if err != nil {
 			log.Error("Docker connection failed to docker specify socket", zap.Error(err), zap.String("DockerSocket", dockerSocket))
 			return err
 		}
 
-		dockerPing, err := dockerClient.Ping(context.Background())
+		_, err = dockerClient.Ping(context.Background(), client.PingOptions{NegotiateAPIVersion: true})
 		if err != nil {
 			log.Error("Docker ping failed on specify socket", zap.Error(err), zap.String("DockerSocket", dockerSocket))
 			return err
 		}
-
-		dockerClient.NegotiateAPIVersionPing(dockerPing)
 
 		wrappedClient := docker.WrapClient(dockerClient)
 
@@ -116,20 +111,18 @@ func (dockerLoader *DockerLoader) Start() error {
 
 	// by default it will used the env docker
 	if len(dockerClients) == 0 {
-		dockerClient, err := client.NewEnvClient()
+		dockerClient, err := client.New(client.FromEnv)
 		dockerLoader.options.DockerSockets = append(dockerLoader.options.DockerSockets, os.Getenv("DOCKER_HOST"))
 		if err != nil {
 			log.Error("Docker connection failed", zap.Error(err))
 			return err
 		}
 
-		dockerPing, err := dockerClient.Ping(context.Background())
+		_, err = dockerClient.Ping(context.Background(), client.PingOptions{NegotiateAPIVersion: true})
 		if err != nil {
 			log.Error("Docker ping failed", zap.Error(err))
 			return err
 		}
-
-		dockerClient.NegotiateAPIVersionPing(dockerPing)
 
 		wrappedClient := docker.WrapClient(dockerClient)
 
@@ -158,6 +151,7 @@ func (dockerLoader *DockerLoader) Start() error {
 		zap.Strings("DockerSockets", dockerLoader.options.DockerSockets),
 		zap.Strings("DockerCertsPath", dockerLoader.options.DockerCertsPath),
 		zap.Strings("DockerAPIsVersion", dockerLoader.options.DockerAPIsVersion),
+		zap.String("CaddyfileAutosavePath", CaddyfileAutosavePath),
 	)
 
 	ready := make(chan struct{})
@@ -180,7 +174,7 @@ func (dockerLoader *DockerLoader) monitorEvents() {
 }
 
 func (dockerLoader *DockerLoader) listenEvents() {
-	args := filters.NewArgs()
+	args := make(client.Filters)
 	if !isTrue.MatchString(os.Getenv("CADDY_DOCKER_NO_SCOPE")) {
 		// This env var is useful for Podman where in some instances the scope can cause some issues.
 		args.Add("scope", "swarm")
@@ -194,7 +188,7 @@ func (dockerLoader *DockerLoader) listenEvents() {
 	for i, dockerClient := range dockerLoader.dockerClients {
 		context, cancel := context.WithCancel(context.Background())
 
-		eventsChan, errorChan := dockerClient.Events(context, events.ListOptions{
+		eventsChan, errorChan := dockerClient.Events(context, client.EventsListOptions{
 			Filters: args,
 		})
 
@@ -252,10 +246,15 @@ func (dockerLoader *DockerLoader) update() bool {
 	dockerLoader.lastCaddyfile = caddyfile
 
 	if caddyfileChanged {
-		log.Info("New Caddyfile", zap.ByteString("caddyfile", caddyfile))
+		log.Debug("New Caddyfile", zap.ByteString("caddyfile", caddyfile))
 
-		if autosaveErr := os.WriteFile(CaddyfileAutosavePath, caddyfile, 0666); autosaveErr != nil {
-			log.Warn("Failed to autosave caddyfile", zap.Error(autosaveErr), zap.String("path", CaddyfileAutosavePath))
+		tmpPath := CaddyfileAutosavePath + ".tmp"
+		if err := os.MkdirAll(filepath.Dir(CaddyfileAutosavePath), 0700); err != nil {
+			log.Warn("Failed to create autosave directory", zap.Error(err), zap.String("path", filepath.Dir(CaddyfileAutosavePath)))
+		} else if err := os.WriteFile(tmpPath, caddyfile, 0640); err != nil {
+			log.Warn("Failed to write temporary caddyfile", zap.Error(err), zap.String("path", tmpPath))
+		} else if err := os.Rename(tmpPath, CaddyfileAutosavePath); err != nil {
+			log.Warn("Failed to autosave caddyfile", zap.Error(err), zap.String("path", CaddyfileAutosavePath))
 		}
 
 		adapter := caddyconfig.GetAdapter("caddyfile")
@@ -271,7 +270,7 @@ func (dockerLoader *DockerLoader) update() bool {
 			return false
 		}
 
-		log.Info("New Config JSON", zap.ByteString("json", configJSON))
+		log.Debug("New Config JSON", zap.ByteString("json", configJSON))
 
 		dockerLoader.lastJSONConfig = configJSON
 		dockerLoader.lastVersion++
@@ -282,10 +281,21 @@ func (dockerLoader *DockerLoader) update() bool {
 		wg.Add(1)
 		go dockerLoader.updateServer(&wg, server)
 	}
+	// When this instance also serves (standalone/server mode), push to the
+	// in-process Caddy as well. The generator lists only remote servers, so the
+	// local target is added here.
+	if dockerLoader.options.Mode&config.Server == config.Server {
+		wg.Add(1)
+		go dockerLoader.updateServer(&wg, localServer)
+	}
 	wg.Wait()
 
 	return true
 }
+
+// localServer is the controlledServers entry that represents this in-process
+// Caddy. It is pushed via caddy.Load instead of the admin API.
+const localServer = "localhost"
 
 func (dockerLoader *DockerLoader) updateServer(wg *sync.WaitGroup, server string) {
 	defer wg.Done()
@@ -309,35 +319,20 @@ func (dockerLoader *DockerLoader) updateServer(wg *sync.WaitGroup, server string
 	log := logger()
 	log.Info("Sending configuration to", zap.String("server", server))
 
-	url := "http://" + server + ":2019/load"
-
-	postBody, err := addAdminListen(dockerLoader.lastJSONConfig, "tcp/"+server+":2019")
+	postBody, err := dockerLoader.prepareServerConfig(server)
 	if err != nil {
-		log.Error("Failed to add admin listen to", zap.String("server", server), zap.Error(err))
+		log.Error("Failed to prepare configuration for", zap.String("server", server), zap.Error(err))
 		return
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(postBody))
-	if err != nil {
-		log.Error("Failed to create request to", zap.String("server", server), zap.Error(err))
-		return
+	// The local target loads in-process; remote targets POST to the admin API.
+	if server == localServer {
+		err = pushLocal(postBody)
+	} else {
+		err = pushRemoteAdmin(server, postBody)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-
 	if err != nil {
 		log.Error("Failed to send configuration to", zap.String("server", server), zap.Error(err))
-		return
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Error("Failed to read response from", zap.String("server", server), zap.Error(err))
-		return
-	}
-
-	if resp.StatusCode != 200 {
-		log.Error("Error response from server", zap.String("server", server), zap.Int("status code", resp.StatusCode), zap.ByteString("body", bodyBytes))
 		return
 	}
 
@@ -346,14 +341,46 @@ func (dockerLoader *DockerLoader) updateServer(wg *sync.WaitGroup, server string
 	log.Info("Successfully configured", zap.String("server", server))
 }
 
-func addAdminListen(configJSON []byte, listen string) ([]byte, error) {
+// prepareServerConfig builds the config to push to server from the loader's last
+// generated config, with a single unmarshal/marshal round-trip.
+func (dockerLoader *DockerLoader) prepareServerConfig(server string) ([]byte, error) {
 	config := &caddy.Config{}
-	err := json.Unmarshal(configJSON, config)
-	if err != nil {
+	if err := json.Unmarshal(dockerLoader.lastJSONConfig, config); err != nil {
 		return nil, err
 	}
-	config.Admin = &caddy.AdminConfig{
-		Listen: listen,
+
+	// The local instance loads in-process, so an explicit admin config ("admin
+	// off" included) is respected and only an absent one is filled from
+	// CADDY_ADMIN or the default. Remote servers always need a reachable admin
+	// endpoint for controller pushes, so an absent or disabled one is overridden.
+	if server == localServer {
+		if config.Admin == nil {
+			if dockerLoader.options.AdminDisabled {
+				config.Admin = &caddy.AdminConfig{Disabled: true}
+			} else if dockerLoader.options.AdminListen != "" {
+				config.Admin = &caddy.AdminConfig{Listen: dockerLoader.options.AdminListen}
+			} else {
+				config.Admin = &caddy.AdminConfig{Listen: defaultAdminListen}
+			}
+		}
+	} else if config.Admin == nil || config.Admin.Disabled {
+		config.Admin = &caddy.AdminConfig{Listen: getServerAdminListen(dockerLoader.options, server)}
 	}
+
+	// Re-apply our logging only to the local Caddy (the standalone self-push),
+	// so --log-level/--log-format survive its config reload. Remote servers run
+	// their own instance and manage their own logging. Logging already defined
+	// in the config (e.g. via labels) is respected.
+	if server == localServer && dockerLoader.caddyLogging != nil && (config.Logging == nil || len(config.Logging.Logs) == 0) {
+		config.Logging = dockerLoader.caddyLogging
+	}
+
 	return json.Marshal(config)
+}
+
+func getServerAdminListen(options *config.Options, server string) string {
+	if options.AdminListen != "" {
+		return options.AdminListen
+	}
+	return "tcp/" + server + ":2019"
 }

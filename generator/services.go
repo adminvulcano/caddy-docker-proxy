@@ -2,12 +2,11 @@ package generator
 
 import (
 	"context"
-	"net"
+	"errors"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/swarm"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/caddyfile"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 
 	"go.uber.org/zap"
 )
@@ -15,9 +14,16 @@ import (
 func (g *CaddyfileGenerator) getServiceCaddyfile(service *swarm.Service, logger *zap.Logger) (*caddyfile.Container, error) {
 	caddyLabels := g.filterLabels(service.Spec.Labels)
 
-	return labelsToCaddyfile(caddyLabels, service, func() ([]string, error) {
-		return g.getServiceProxyTargets(service, logger, true)
-	})
+	return labelsToCaddyfile(
+		caddyLabels,
+		service,
+		func() ([]string, error) {
+			return g.getServiceProxyTargets(service, logger, true)
+		},
+		func() (int, error) {
+			return 0, errors.New("not supported for swarm services, specify the port explicitly")
+		},
+	)
 }
 
 func (g *CaddyfileGenerator) getServiceProxyTargets(service *swarm.Service, logger *zap.Logger, onlyIngressIps bool) ([]string, error) {
@@ -38,7 +44,7 @@ func (g *CaddyfileGenerator) getServiceVirtualIps(service *swarm.Service, logger
 
 	for _, virtualIP := range service.Endpoint.VirtualIPs {
 		if !onlyIngressIps || g.ingressNetworks[virtualIP.NetworkID] {
-			virtualIps = append(virtualIps, virtualIP.Addr)
+			virtualIps = append(virtualIps, virtualIP.Addr.String())
 		}
 	}
 
@@ -50,7 +56,7 @@ func (g *CaddyfileGenerator) getServiceVirtualIps(service *swarm.Service, logger
 }
 
 func (g *CaddyfileGenerator) getServiceTasksIps(service *swarm.Service, logger *zap.Logger, onlyIngressIps bool) ([]string, error) {
-	taskListFilter := filters.NewArgs()
+	taskListFilter := make(client.Filters)
 	taskListFilter.Add("service", service.ID)
 	taskListFilter.Add("desired-state", "running")
 
@@ -58,9 +64,10 @@ func (g *CaddyfileGenerator) getServiceTasksIps(service *swarm.Service, logger *
 	tasksIps := []string{}
 
 	for _, dockerClient := range g.dockerClients {
-		tasks, err := dockerClient.TaskList(context.Background(), types.TaskListOptions{Filters: taskListFilter})
+		tasks, err := dockerClient.TaskList(context.Background(), client.TaskListOptions{Filters: taskListFilter})
 		if err != nil {
-			return []string{}, err
+			logger.Debug("Failed to get Swarm tasks from docker client, skipping", zap.String("service", service.Spec.Name), zap.Error(err))
+			continue
 		}
 
 		for _, task := range tasks {
@@ -81,8 +88,7 @@ func (g *CaddyfileGenerator) getServiceTasksIps(service *swarm.Service, logger *
 
 					if include {
 						for _, address := range networkAttachment.Addresses {
-							ipAddress, _, _ := net.ParseCIDR(address)
-							tasksIps = append(tasksIps, ipAddress.String())
+							tasksIps = append(tasksIps, address.Addr().String())
 						}
 					}
 				}
@@ -91,7 +97,7 @@ func (g *CaddyfileGenerator) getServiceTasksIps(service *swarm.Service, logger *
 	}
 
 	if !hasRunningTasks {
-		logger.Warn("Service has no tasks in running state", zap.String("service", service.Spec.Name), zap.String("serviceId", service.ID))
+		logger.Debug("Service has no tasks in running state", zap.String("service", service.Spec.Name), zap.String("serviceId", service.ID))
 
 	} else if len(tasksIps) == 0 {
 		logger.Warn("Service is not in same network as caddy", zap.String("service", service.Spec.Name), zap.String("serviceId", service.ID))

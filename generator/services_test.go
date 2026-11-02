@@ -1,12 +1,19 @@
 package generator
 
 import (
+	"bufio"
+	"bytes"
+	"errors"
 	"testing"
 
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/system"
 	"github.com/lucaslorentz/caddy-docker-proxy/v2/config"
+	"github.com/lucaslorentz/caddy-docker-proxy/v2/docker"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/api/types/system"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestServices_TemplateData(t *testing.T) {
@@ -101,10 +108,7 @@ func TestServices_DifferentNetwork(t *testing.T) {
 func TestServices_ManualIngressNetwork(t *testing.T) {
 	dockerClient := createBasicDockerClientMock()
 	dockerClient.NetworksData = []network.Summary{
-		{
-			ID:   "other-network-id",
-			Name: "other-network-name",
-		},
+		networkSummary("other-network-id", "other-network-name"),
 	}
 	dockerClient.ServicesData = []swarm.Service{
 		{
@@ -132,7 +136,7 @@ func TestServices_ManualIngressNetwork(t *testing.T) {
 		"	reverse_proxy service\n" +
 		"}\n"
 
-	const expectedLogs = otherIngressNetworksMapLog + swarmIsAvailableLog
+	const expectedLogs = swarmIsAvailableLog
 
 	testGeneration(t, dockerClient, func(options *config.Options) {
 		options.IngressNetworks = []string{"other-network-name"}
@@ -170,7 +174,7 @@ func TestServices_SwarmDisabled(t *testing.T) {
 
 	const expectedCaddyfile = "# Empty caddyfile"
 
-	const expectedLogs = containerIdLog + ingressNetworksMapLog + swarmIsDisabledLog
+	const expectedLogs = swarmIsDisabledLog
 
 	testGeneration(t, dockerClient, nil, expectedCaddyfile, expectedLogs)
 }
@@ -203,8 +207,7 @@ func TestServiceTasks_Empty(t *testing.T) {
 		"	reverse_proxy\n" +
 		"}\n"
 
-	const expectedLogs = commonLogs +
-		`WARN	Service has no tasks in running state	{"service": "service", "serviceId": "SERVICEID"}` + newLine
+	const expectedLogs = commonLogs
 
 	testGeneration(t, dockerClient, func(options *config.Options) {
 		options.ProxyServiceTasks = true
@@ -242,7 +245,7 @@ func TestServiceTasks_NotRunning(t *testing.T) {
 					Network: swarm.Network{
 						ID: caddyNetworkID,
 					},
-					Addresses: []string{"10.0.0.1/24"},
+					Addresses: prefixes("10.0.0.1/24"),
 				},
 			},
 			DesiredState: swarm.TaskStateShutdown,
@@ -255,7 +258,7 @@ func TestServiceTasks_NotRunning(t *testing.T) {
 					Network: swarm.Network{
 						ID: caddyNetworkID,
 					},
-					Addresses: []string{"10.0.0.2/24"},
+					Addresses: prefixes("10.0.0.2/24"),
 				},
 			},
 			DesiredState: swarm.TaskStateRunning,
@@ -267,8 +270,7 @@ func TestServiceTasks_NotRunning(t *testing.T) {
 		"	reverse_proxy\n" +
 		"}\n"
 
-	const expectedLogs = commonLogs +
-		`WARN	Service has no tasks in running state	{"service": "service", "serviceId": "SERVICEID"}` + newLine
+	const expectedLogs = commonLogs
 
 	testGeneration(t, dockerClient, func(options *config.Options) {
 		options.ProxyServiceTasks = true
@@ -306,7 +308,7 @@ func TestServiceTasks_DifferentNetwork(t *testing.T) {
 					Network: swarm.Network{
 						ID: "other-network-id",
 					},
-					Addresses: []string{"10.0.0.1/24"},
+					Addresses: prefixes("10.0.0.1/24"),
 				},
 			},
 			DesiredState: swarm.TaskStateRunning,
@@ -350,10 +352,7 @@ func TestServiceTasks_ManualIngressNetwork(t *testing.T) {
 		},
 	}
 	dockerClient.NetworksData = []network.Summary{
-		{
-			ID:   "other-network-id",
-			Name: "other-network-name",
-		},
+		networkSummary("other-network-id", "other-network-name"),
 	}
 	dockerClient.TasksData = []swarm.Task{
 		{
@@ -363,7 +362,7 @@ func TestServiceTasks_ManualIngressNetwork(t *testing.T) {
 					Network: swarm.Network{
 						ID: "other-network-id",
 					},
-					Addresses: []string{"10.0.0.1/24"},
+					Addresses: prefixes("10.0.0.1/24"),
 				},
 			},
 			DesiredState: swarm.TaskStateRunning,
@@ -375,7 +374,7 @@ func TestServiceTasks_ManualIngressNetwork(t *testing.T) {
 		"	reverse_proxy 10.0.0.1:5000\n" +
 		"}\n"
 
-	const expectedLogs = otherIngressNetworksMapLog + swarmIsAvailableLog
+	const expectedLogs = swarmIsAvailableLog
 
 	testGeneration(t, dockerClient, func(options *config.Options) {
 		options.ProxyServiceTasks = true
@@ -408,14 +407,8 @@ func TestServiceTasks_OverrideIngressNetwork(t *testing.T) {
 		},
 	}
 	dockerClient.NetworksData = []network.Summary{
-		{
-			ID:   "other-network-id",
-			Name: "other-network-name",
-		},
-		{
-			ID:   "another-network-id",
-			Name: "another-network-name",
-		},
+		networkSummary("other-network-id", "other-network-name"),
+		networkSummary("another-network-id", "another-network-name"),
 	}
 	dockerClient.TasksData = []swarm.Task{
 		{
@@ -430,7 +423,7 @@ func TestServiceTasks_OverrideIngressNetwork(t *testing.T) {
 							},
 						},
 					},
-					Addresses: []string{"10.0.0.1/24"},
+					Addresses: prefixes("10.0.0.1/24"),
 				},
 				{
 					Network: swarm.Network{
@@ -441,7 +434,7 @@ func TestServiceTasks_OverrideIngressNetwork(t *testing.T) {
 							},
 						},
 					},
-					Addresses: []string{"10.0.0.2/24"},
+					Addresses: prefixes("10.0.0.2/24"),
 				},
 			},
 			DesiredState: swarm.TaskStateRunning,
@@ -453,7 +446,7 @@ func TestServiceTasks_OverrideIngressNetwork(t *testing.T) {
 		"	reverse_proxy 10.0.0.2:5000\n" +
 		"}\n"
 
-	const expectedLogs = otherIngressNetworksMapLog + swarmIsAvailableLog
+	const expectedLogs = swarmIsAvailableLog
 
 	testGeneration(t, dockerClient, func(options *config.Options) {
 		options.ProxyServiceTasks = true
@@ -492,7 +485,7 @@ func TestServiceTasks_Running(t *testing.T) {
 					Network: swarm.Network{
 						ID: caddyNetworkID,
 					},
-					Addresses: []string{"10.0.0.1/24"},
+					Addresses: prefixes("10.0.0.1/24"),
 				},
 			},
 			DesiredState: swarm.TaskStateRunning,
@@ -505,7 +498,7 @@ func TestServiceTasks_Running(t *testing.T) {
 					Network: swarm.Network{
 						ID: caddyNetworkID,
 					},
-					Addresses: []string{"10.0.0.2/24"},
+					Addresses: prefixes("10.0.0.2/24"),
 				},
 			},
 			DesiredState: swarm.TaskStateRunning,
@@ -522,4 +515,123 @@ func TestServiceTasks_Running(t *testing.T) {
 	testGeneration(t, dockerClient, func(options *config.Options) {
 		options.ProxyServiceTasks = true
 	}, expectedCaddyfile, expectedLogs)
+}
+
+// TestServiceTasks_OneClientTaskListError verifies that when running in
+// multi-socket mode and one of the docker clients returns an error from
+// TaskList (e.g. a Swarm worker responding "This node is not a swarm
+// manager"), the generator continues to collect tasks from the remaining
+// healthy clients instead of dropping the service's upstreams entirely.
+//
+// Regression test for #801 / fix for the pre-existing fail-fast in
+// getServiceTasksIps that was carried over from the single-client era in
+// PR #303 without adapting the error semantics for the multi-client loop.
+func TestServiceTasks_OneClientTaskListError(t *testing.T) {
+	managerClient := createBasicDockerClientMock()
+	managerClient.ServicesData = []swarm.Service{
+		{
+			ID: "SERVICEID",
+			Spec: swarm.ServiceSpec{
+				Annotations: swarm.Annotations{
+					Name: "service",
+					Labels: map[string]string{
+						fmtLabel("%s"):               "service.testdomain.com",
+						fmtLabel("%s.reverse_proxy"): "{{upstreams 5000}}",
+					},
+				},
+			},
+			Endpoint: swarm.Endpoint{
+				VirtualIPs: []swarm.EndpointVirtualIP{
+					{NetworkID: caddyNetworkID},
+				},
+			},
+		},
+	}
+	managerClient.TasksData = []swarm.Task{
+		{
+			ServiceID: "SERVICEID",
+			NetworksAttachments: []swarm.NetworkAttachment{
+				{
+					Network:   swarm.Network{ID: caddyNetworkID},
+					Addresses: prefixes("10.0.0.1/24"),
+				},
+			},
+			DesiredState: swarm.TaskStateRunning,
+			Status:       swarm.TaskStatus{State: swarm.TaskStateRunning},
+		},
+	}
+
+	// Second client behaves like a Swarm worker: TaskList returns the
+	// "not a swarm manager" error that real workers return.
+	workerClient := createBasicDockerClientMock()
+	workerClient.TaskListErr = errors.New("Error response from daemon: This node is not a swarm manager.")
+
+	options := &config.Options{
+		LabelPrefix:       DefaultLabelPrefix,
+		ProxyServiceTasks: true,
+	}
+
+	dockerUtils := createDockerUtilsMock()
+	generator := CreateGenerator(
+		[]docker.Client{managerClient, workerClient},
+		dockerUtils,
+		options,
+	)
+
+	var logsBuffer bytes.Buffer
+	encoderConfig := zap.NewDevelopmentEncoderConfig()
+	encoderConfig.TimeKey = ""
+	encoder := zapcore.NewConsoleEncoder(encoderConfig)
+	writer := bufio.NewWriter(&logsBuffer)
+	logger := zap.New(zapcore.NewCore(encoder, zapcore.AddSync(writer), zapcore.InfoLevel))
+
+	caddyfileBytes, _ := generator.GenerateCaddyfile(logger)
+	writer.Flush()
+
+	const expectedCaddyfile = "service.testdomain.com {\n" +
+		"	reverse_proxy 10.0.0.1:5000\n" +
+		"}\n"
+
+	assert.Equal(t, expectedCaddyfile, string(caddyfileBytes),
+		"manager client's task IP must still reach the Caddyfile when a peer client's TaskList errors")
+}
+
+// lowestExposedPort is not supported for swarm services: the service is
+// skipped and logged, without affecting other services.
+func TestServices_LowestExposedPortIsNotSupported(t *testing.T) {
+	newService := func(name string, reverseProxy string) swarm.Service {
+		return swarm.Service{
+			Spec: swarm.ServiceSpec{
+				Annotations: swarm.Annotations{
+					Name: name,
+					Labels: map[string]string{
+						fmtLabel("%s"):               name + ".testdomain.com",
+						fmtLabel("%s.reverse_proxy"): reverseProxy,
+					},
+				},
+			},
+			Endpoint: swarm.Endpoint{
+				VirtualIPs: []swarm.EndpointVirtualIP{
+					{
+						NetworkID: caddyNetworkID,
+					},
+				},
+			},
+		}
+	}
+
+	dockerClient := createBasicDockerClientMock()
+	dockerClient.ServicesData = []swarm.Service{
+		newService("auto", "{{upstreams lowestExposedPort}}"),
+		newService("explicit", "{{upstreams 8080}}"),
+	}
+
+	const expectedCaddyfile = "explicit.testdomain.com {\n" +
+		"	reverse_proxy explicit:8080\n" +
+		"}\n"
+
+	const expectedLogs = commonLogs +
+		`ERROR	Failed to get Swarm service caddyfile	{"service": "auto", "error": "template: :1:12: executing \"\" at <lowestExposedPort>: error calling lowestExposedPort: not supported for swarm services, specify the port explicitly"}` + newLine
+
+	testGeneration(t, dockerClient, nil, expectedCaddyfile, expectedLogs)
 }
